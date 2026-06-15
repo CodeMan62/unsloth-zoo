@@ -3117,6 +3117,26 @@ def detect_keys_format(keys_to_check, forward_mapping):
     return "new" # Default to current HF format
 pass
 
+def _match_lora_to_safetensor_module(lora_key, sf_modules):
+    """Map a runtime LoRA module name to a checkpoint safetensor module (no .weight)."""
+    prefixes = (
+        "model.language_model.model.",
+        "language_model.model.",
+        "model.language_model.",
+        "language_model.",
+        "model.",
+    )
+    if not sf_modules:
+        return None
+    if lora_key in sf_modules:
+        return lora_key
+    tail = next((lora_key.removeprefix(p) for p in prefixes if lora_key.startswith(p)), lora_key)
+    matches = [
+        module for module in sf_modules
+        if next((module.removeprefix(p) for p in prefixes if module.startswith(p)), module) == tail
+    ]
+    return matches[0] if len(matches) == 1 else None
+
 def _infer_prefix_and_remap(lora_weights, safetensor_keys):
     """Infer missing key prefixes by matching LoRA keys against safetensor keys.
 
@@ -3133,6 +3153,11 @@ def _infer_prefix_and_remap(lora_weights, safetensor_keys):
         return None
 
     sf_key_set = set(safetensor_keys)
+    sf_modules = {
+        key[: -len(".weight")]: key
+        for key in safetensor_keys
+        if isinstance(key, str) and key.endswith(".weight")
+    }
     remapped = defaultdict(lora_weights.default_factory)
     changed = False
     inferred_prefixes = []  # track prefixes from successful per-key matches
@@ -3145,6 +3170,12 @@ def _infer_prefix_and_remap(lora_weights, safetensor_keys):
         # Already matches a safetensor key
         if (k + ".weight") in sf_key_set:
             remapped[k] = v
+            continue
+        matched_module = _match_lora_to_safetensor_module(k, sf_modules)
+        if matched_module is not None:
+            remapped[matched_module] = v
+            if matched_module != k:
+                changed = True
             continue
         # Unique non-empty prefix candidates for this key
         suffix = k + ".weight"
